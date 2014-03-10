@@ -1,4 +1,5 @@
 -- Requires parsec, parsecTools and missingH
+-- TODO support files with unweighted rules (and learn the weights, but start with the smoke example first)
 
 import Text.ParserCombinators.Parsec hiding (spaces)
 import Text.Parsec.Char hiding (spaces)
@@ -86,28 +87,27 @@ main = do
     withFile filename ReadMode (\handle -> do
         broken_contents <- hGetContents handle
         let contents = workaround_haskell_bullshit broken_contents
-        putStr $ prettyList $ map schemeAtom $ parseFile filename contents
+        print $ prettyList $ map schemeAtom $ parseFile filename contents
         )
 
-parseFile :: String -> String -> [Atom]
+parseFile :: String -> String -> Either ParseError [Atom]
 parseFile filename contents
     | isSuffixOf ".mln" filename =
-        let
-            (Right (predicates, rules)) = parseProg $ workaround_haskell_bullshit contents
-            predicateAtoms = map convertPredicateDefinition predicates
-            ruleAtoms = map convertRule rules
-        in
-            predicateAtoms++ruleAtoms
-    | "evidence.db" == filename = let
-        (Right statements) = parseDB $ workaround_haskell_bullshit contents
-        atoms = map convert_statement statements
-        in
-            atoms
-    | "query.db" == filename = let
-        (Right statements) = parseDB $ workaround_haskell_bullshit contents
-        atoms = map convert_query statements
-        in
-            atoms
+        case parseProg $ workaround_haskell_bullshit contents of
+            e@(Left _) -> e
+            (Right (predicates, rules)) -> let
+                    predicateAtoms = map convertPredicateDefinition predicates
+                    ruleAtoms = map adaptRule rules
+                in
+                    Right (predicateAtoms++ruleAtoms)
+    | isSuffixOf "evidence.db" filename =
+        case parseDB $ workaround_haskell_bullshit contents of
+            (Right statements) -> Right map convert_statement statements
+            e@(Left _) -> e
+    | isSuffixOf "query.db" filename =
+        case parseDB $ workaround_haskell_bullshit contents of
+            Right statements -> Right map convert_query statements
+            e@(Left _) -> e
 
 
 ----------------- Output stuff to Scheme (Should be in a separate file).
@@ -152,6 +152,37 @@ convertRule (Rule weight predicates) =
     where
         tv = STV 0.5 0.5
 
+--------- Better rule conversion (don't just use a disjunction/AndLink, do something more useful such as creating ImplicationLinks).
+adaptRule :: Rule -> Atom
+adaptRule r@(Rule weight predicates) =
+    let
+        (negated, true) = filterPredicates r
+    in
+        if length true == 1 && length negated == 0 then convert_query $ head true else
+        if length true == 0 && length negated == 1 then convert_query $ head negated else -- it doesn't have to be Not A, it can just be A - and PLN will use a probability for it
+        if length true == 1 && length negated == 1 then implication (convert_query $ head negated) (convert_query $ head true)
+        else 
+            Link "OrLink" (map convert_query predicates) tv
+            where
+                tv = STV 0.5 0.5
+
+implication :: Atom -> Atom -> Atom
+implication lhs rhs = Link "ImplicationLink" [lhs, rhs] queryTV
+
+-- Filter a Rule into the negated predicates and the true predicates.
+-- Remove the "!" from the name
+filterPredicates :: Rule -> ([Predicate], [Predicate])
+filterPredicates (Rule _ predicates) =
+    (map negatePredicate $ filter (\p -> not $ truePredicate p) predicates,
+     filter (truePredicate) predicates)
+
+truePredicate :: Predicate -> Bool
+truePredicate (Predicate relation _) = not $ isPrefixOf "!" relation
+
+negatePredicate :: Predicate -> Predicate
+negatePredicate p@(Predicate relation arguments)
+    | truePredicate p = p
+    | otherwise = (Predicate (tail relation) arguments)
 
 -- OpenCog Scheme output
 --data TruthValue = STV Float Float deriving (Show)
